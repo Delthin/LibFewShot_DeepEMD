@@ -1,0 +1,4 @@
+classifier:
+  name: DeepEMD
+  kwargs:
+
