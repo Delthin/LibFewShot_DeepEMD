@@ -1,0 +1,5 @@
+classifier:
+  name: DeepEMDPretrain
+  kwargs:
+    feat_dim: 640  
+    num_class: 64 # 预训练类别数

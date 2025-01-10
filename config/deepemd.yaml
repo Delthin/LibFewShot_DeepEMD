@@ -15,6 +15,7 @@ classifier:
   kwargs:
     hdim: 640
     temperature: 12.5
+    pretrain_path: "pretrained_models/miniimagenet/resnet12/max_acc.pth"
     solver: opencv
     feature_mode: fcn
     # Solver参数
