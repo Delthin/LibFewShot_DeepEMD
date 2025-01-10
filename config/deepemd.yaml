@@ -4,3 +4,28 @@ includes:
   - headers/misc.yaml
   - headers/model.yaml
   - headers/optimizer.yaml
+
+backbone:
+  name: resnet12Bdc
+  kwargs:
+    reduce_dim: 640
+
+classifier:
+  name: DeepEMD
+  kwargs:
+    hdim: 640
+    temperature: 12.5
+    solver: opencv
+    feature_mode: fcn
+    # Solver参数
+    form: QP
+    l2_strength: 0.0001
+    # 特征提取参数
+    feature_pyramid: "2,3"  
+    patch_list: "2,3"
+    patch_ratio: 1.0
+    num_patch: 25
+    # SFC参数
+    sfc_lr: 0.1
+    sfc_update_step: 100
+    sfc_bs: 4
