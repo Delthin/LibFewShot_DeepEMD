@@ -2,6 +2,7 @@ from torch import nn
 from .finetuning_model import FinetuningModel
 from core.utils import accuracy
 
+# TODO
 class DeepEMDPretrain(FinetuningModel):
     def __init__(self, feat_dim, num_class, **kwargs):
         super().__init__(**kwargs)

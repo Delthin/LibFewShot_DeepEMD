@@ -4,6 +4,7 @@ from torch import nn
 from .metric_model import MetricModel
 from core.utils import accuracy
 
+# TODO
 class ProtoLayer(nn.Module):
     """原型计算的基类"""
     def __init__(self):
@@ -25,7 +26,7 @@ class ProtoLayer(nn.Module):
 
         return query_feat, proto_feat
 
-
+# TODO
 class EMDLayer(ProtoLayer):
     def __init__(self, solver='opencv', form='QP', l2_strength=0.0001):
         super().__init__()
@@ -56,7 +57,7 @@ class EMDLayer(ProtoLayer):
         """OpenCV求解器实现"""
         # ...原emd_inference_opencv实现...
 
-
+# TODO
 class FeatureExtractor(nn.Module):
     def __init__(self, feature_mode='fcn', feature_pyramid=None, patch_list='2,3', num_patch=25):
         super().__init__() 
@@ -84,7 +85,7 @@ class FeatureExtractor(nn.Module):
         # ...原sampling采样实现...
         pass
 
-
+# TODO
 class SFCLayer(nn.Module):
     def __init__(self, hdim, way_num, sfc_lr=0.1, sfc_update_step=100):
         super().__init__()
@@ -96,6 +97,7 @@ class SFCLayer(nn.Module):
         # ...SFC微调实现...
         pass
 
+# TODO
 class SimilarityLayer(nn.Module):
     def __init__(self):
         super().__init__()
@@ -112,7 +114,7 @@ class SimilarityLayer(nn.Module):
         #...原get_weight_vector实现...
         pass
 
-
+# TODO
 class DeepEMD(MetricModel):
     def __init__(self, hdim, temperature=12.5, **kwargs):
         super().__init__(**kwargs)
