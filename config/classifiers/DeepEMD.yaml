@@ -12,7 +12,7 @@ classifier:
     feature_pyramid: "2,3"  
     patch_list: "2,3"
     patch_ratio: 1.0
-    num_patch: 25
+    num_patch: 9
     # SFC参数
     sfc_lr: 0.1
     sfc_update_step: 100

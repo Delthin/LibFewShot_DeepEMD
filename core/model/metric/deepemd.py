@@ -239,17 +239,6 @@ class DeepEMD(MetricModel):
 
     
     def set_forward(self, batch):
-        """前向推理
-        
-        Args:
-            batch (tuple): (images, _)
-                - images: [episode_size*(way_num*(shot_num+query_num)), 3, H, W]
-                
-        Returns:
-            tuple: 包含:
-                - logits (torch.Tensor): [episode_size*way_num*query_num, way_num] 分类得分
-                - acc (float): 分类准确率
-        """
         image, _ = batch
         image = image.to(self.device)
         episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
@@ -257,7 +246,12 @@ class DeepEMD(MetricModel):
         # 1. 特征提取
         feat = self.emb_func(image)
         feat = self.feature_extractor(feat)
-        support_feat, query_feat, support_target, query_target = self.split_by_episode(feat)
+        if self.args.feature_mode == 'fcn':
+            mode = 2  # 4D
+        else: 
+            mode = 1  # 3D
+            
+        support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=mode)
 
         # 2. SFC微调(仅在测试时使用)
         if not self.training:
@@ -274,24 +268,26 @@ class DeepEMD(MetricModel):
         return logits, acc
 
     def set_forward_loss(self, batch):
-        """训练损失计算
-        
-        Args:
-            batch: 同set_forward输入
-            
-        Returns:
-            tuple: 包含:
-                - logits (torch.Tensor): [episode_size*way_num*query_num, way_num] 
-                - acc (float): 准确率
-                - loss (torch.Tensor): 标量损失值
-        """
         image, _ = batch
         image = image.to(self.device)
+        episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
         
-        # 1. 前向传播
-        logits, acc = self.set_forward(batch) 
+        feat = self.emb_func(image)
+        feat = self.feature_extractor(feat)
         
-        # 2. 损失计算  
+        if self.args.feature_mode == 'fcn':
+            mode = 2
+        else:
+            mode = 1
+        support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=mode)
+
+        # while training, we don't use the SFC layer
+        similarity_map = self.similarity_layer(query_feat, support_feat) 
+        weight_1, weight_2 = self.similarity_layer.get_weight_vector(query_feat, support_feat)
+        logits = self.emd_layer(similarity_map, weight_1, weight_2)
+        
+        logits = logits.reshape(episode_size * self.way_num * self.query_num, self.way_num)
         loss = self.loss_func(logits, query_target.reshape(-1))
+        acc = accuracy(logits, query_target.reshape(-1))
         
         return logits, acc, loss

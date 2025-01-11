@@ -1,33 +1,31 @@
-# TODO
 includes:
   - headers/data.yaml
   - headers/device.yaml
   - headers/misc.yaml
   - headers/model.yaml
   - headers/optimizer.yaml
+  - classifiers/DeepEMD.yaml
+  - backbones/resnet12.yaml
+
+seed: 1 # maybe in reproduce?
+pretrain_path: null
+test_episode: 5000
 
 backbone:
-  name: resnet12Bdc
+  name: resnet12
   kwargs:
     reduce_dim: 640
 
-classifier:
-  name: DeepEMD
+optimizer:
+  name: SGD
   kwargs:
-    hdim: 640
-    temperature: 12.5
-    pretrain_path: "pretrained_models/miniimagenet/resnet12/max_acc.pth"
-    solver: opencv
-    feature_mode: fcn
-    # Solver参数
-    form: QP
-    l2_strength: 0.0001
-    # 特征提取参数
-    feature_pyramid: "2,3"  
-    patch_list: "2,3"
-    patch_ratio: 1.0
-    num_patch: 25
-    # SFC参数
-    sfc_lr: 0.1
-    sfc_update_step: 100
-    sfc_bs: 4
+    lr: 0.0005
+    momentum: 0.9
+    nesterov: True
+    weight_decay: 0.0005
+
+lr_scheduler:
+  name: StepLR
+  kwargs:
+    step_size: 10
+    gamma: 0.5
