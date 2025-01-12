@@ -1,6 +1,14 @@
-# TODO
+# version1
 classifier:
   name: DeepEMDPretrain
   kwargs:
     feat_dim: 640  
     num_class: 64 # 预训练类别数
+    # SFC参数
+    sfc_lr: 0.1
+    sfc_update_step: 100
+    sfc_bs: 4
+    # Solver参数
+    form: QP
+    l2_strength: 0.0001
+    solver: opencv # ?
