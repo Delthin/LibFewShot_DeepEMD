@@ -9,12 +9,7 @@ includes:
 
 seed: 1 # maybe in reproduce?
 pretrain_path: null
-test_episode: 5000
-
-backbone:
-  name: resnet12
-  kwargs:
-    reduce_dim: 640
+test_episode: 600 # 源代码是5000，val是1000
 
 optimizer:
   name: SGD

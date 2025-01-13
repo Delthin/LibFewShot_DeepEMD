@@ -15,5 +15,9 @@ classifier:
     num_patch: 9
     # SFC参数
     sfc_lr: 0.1
+    sfc_wd: 0
     sfc_update_step: 100
     sfc_bs: 4
+    # 其他参数
+    metric: cosine
+    norm: center
