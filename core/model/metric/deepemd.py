@@ -6,6 +6,14 @@ from core.utils import accuracy
 from qpth.qp import QPFunction
 import cv2
 
+def debug_shape(x, name, expected_shape=None):
+    print(f"{name} shape:", x.shape)
+    if expected_shape:
+        assert len(x.shape) == len(expected_shape), f"Expected {len(expected_shape)} dims, got {len(x.shape)}"
+        for i, (actual, expected) in enumerate(zip(x.shape, expected_shape)):
+            if expected is not None:  # None 表示这个维度可以是任意值
+                assert actual == expected, f"Dimension {i} mismatch: expected {expected}, got {actual}"
+
 class EMDSolver(nn.Module):
     """EMD solver基类"""
     def __init__(self):
@@ -154,34 +162,39 @@ class EMDLayer(nn.Module):
         """计算EMD距离
         Args:
             similarity_map: [num_query, way_num, N, N]  # [75, 5, 14, 14]
-            weight_1: [num_query, way_num, N]          # [75, 5, 14]
-            weight_2: [way_num, num_query, N]          # [5, 75, 14]
+            weight_1: [episode_size, num_query, way_num, N]
+            weight_2: [episode_size, way_num, num_query, N]
         Returns:
             torch.Tensor: [num_query, way_num] EMD距离
         """
-        num_query = similarity_map.shape[0]  # 75
-        num_proto = similarity_map.shape[1]  # 5
-        num_node = similarity_map.shape[-1]  # 14
+        episode_size = similarity_map.shape[0]
+        num_query = similarity_map.shape[1]
+        num_proto = similarity_map.shape[2]
+        num_node = similarity_map.shape[-1]
+        
+        all_logits = []
         
         logits = torch.zeros(num_query, num_proto).to(similarity_map.device)
         
-        # 遍历每个查询-原型对
-        for i in range(num_query):
-            for j in range(num_proto):
-                # 提取单个cost矩阵和权重向量
-                cost_matrix = 1 - similarity_map[i, j]  # [14, 14]
-                w1 = weight_1[i, j]                     # [14]
-                w2 = weight_2[j, i]                     # [14]
-                
-                # 调用solver计算flow
-                flow = self.solver(cost_matrix.unsqueeze(0), 
-                                 w1.unsqueeze(0),
-                                 w2.unsqueeze(0))       # [1, 14, 14]
-                
-                # 计算EMD得分
-                score = (flow.squeeze(0) * similarity_map[i, j]).sum()
-                logits[i, j] = score
-                
+        for i in range(episode_size):
+            cur_logits = torch.zeros(num_query, num_proto).to(similarity_map.device)
+            
+            for j in range(num_query):
+                for k in range(num_proto):
+                    cost_matrix = 1 - similarity_map[i, j, k]  # [N, N]
+                    w1 = weight_1[i, j, k]                     # [N]
+                    w2 = weight_2[i, k, j]                     # [N]
+                    
+                    flow = self.solver(cost_matrix.unsqueeze(0),
+                                    w1.unsqueeze(0),
+                                    w2.unsqueeze(0))          # [1, N, N]
+                    
+                    score = (flow.squeeze(0) * similarity_map[i, j, k]).sum()
+                    cur_logits[j, k] = score
+                    
+            all_logits.append(cur_logits)
+            
+        logits = torch.stack(all_logits)  # [episode_size, num_query, way_num]
         return logits * (self.temperature / num_node)
 
 class SimilarityLayer(nn.Module):
@@ -196,39 +209,44 @@ class SimilarityLayer(nn.Module):
             proto: [episode_size, way_num, C, 1, N] -> [way_num, C, N]
             query: [episode_size, query_num*way_num, C, 1, N] -> [query_num*way_num, C, N]
         Returns:
-            torch.Tensor: [num_query, way_num, N, N] 相似度矩阵
+            torch.Tensor: [episode_size, num_query, way_num, N, N] 相似度矩阵
         """
+        episode_size = proto.shape[0]
+        similarity_maps = []
         # 1. 去除多余维度
-        proto = proto.squeeze(0).squeeze(2)  # [way_num, C, N]
-        query = query.squeeze(0).squeeze(2)  # [query_num*way_num, C, N]
-        
-        way_num = proto.shape[0]
-        num_query = query.shape[0]
-        
-        # 2. 重复扩展
-        proto = proto.unsqueeze(0).repeat(num_query, 1, 1, 1)  # [num_query, way_num, C, N]
-        query = query.unsqueeze(1).repeat(1, way_num, 1, 1)    # [num_query, way_num, C, N]
-        # 3. 计算相似度
-        if self.metric == 'cosine':
-            proto = proto.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
-            query = query.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
+        for i in range(episode_size):
+            cur_proto = proto[i].squeeze(2)  # [way_num, C, N]
+            cur_query = query[i].squeeze(2)  # [query_num*way_num, C, N]
             
-            proto = proto.unsqueeze(3)  # [num_query, way_num, N, 1, C]
-            query = query.unsqueeze(2)  # [num_query, way_num, 1, N, C]
+            way_num = cur_proto.shape[0]
+            num_query = cur_query.shape[0]
             
-            similarity_map = F.cosine_similarity(proto, query, dim=-1)  # [num_query, way_num, N, N]
+            # 2. 重复扩展
+            cur_proto = cur_proto.unsqueeze(0).repeat(num_query, 1, 1, 1)  # [num_query, way_num, C, N]
+            cur_query = cur_query.unsqueeze(1).repeat(1, way_num, 1, 1)    # [num_query, way_num, C, N]
             
-        elif self.metric == 'l2':
-            proto = proto.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
-            query = query.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
+            # 3. 计算相似度
+            if self.metric == 'cosine':
+                cur_proto = cur_proto.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
+                cur_query = cur_query.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
+                
+                cur_proto = cur_proto.unsqueeze(3)  # [num_query, way_num, N, 1, C]
+                cur_query = cur_query.unsqueeze(2)  # [num_query, way_num, 1, N, C]
+                
+                similarity_map = F.cosine_similarity(cur_proto, cur_query, dim=-1)  # [num_query, way_num, N, N]
+                
+            elif self.metric == 'l2':
+                cur_proto = cur_proto.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
+                cur_query = cur_query.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
+                
+                cur_proto = cur_proto.unsqueeze(3)  # [num_query, way_num, N, 1, C]
+                cur_query = cur_query.unsqueeze(2)  # [num_query, way_num, 1, N, C]
+                
+                l2_distance = (cur_proto - cur_query).pow(2).sum(-1)  # [num_query, way_num, N, N]
+                similarity_map = 1 - l2_distance  # 转换为相似度
+            similarity_maps.append(similarity_map)
             
-            proto = proto.unsqueeze(3)  # [num_query, way_num, N, 1, C]
-            query = query.unsqueeze(2)  # [num_query, way_num, 1, N, C]
-            
-            l2_distance = (proto - query).pow(2).sum(-1)  # [num_query, way_num, N, N]
-            similarity_map = 1 - l2_distance  # 转换为相似度
-            
-        return similarity_map
+        return torch.stack(similarity_maps) # [episode_size, num_query, way_num, N, N]
         
     def normalize_feature(self, x):
         """特征归一化"""
@@ -237,26 +255,33 @@ class SimilarityLayer(nn.Module):
         return x
         
     def get_weight_vector(self, A, B):
-        """计算权重向量
-        """
-        A = A.squeeze(0)
-        B = B.squeeze(0)
+        """计算权重向量"""
+        episode_size = A.shape[0]
+        combinations = []
         
-        M = A.shape[0]
-        N = B.shape[0]
+        for i in range(episode_size):
+            cur_A = A[i]  # [num_query*way_num, C, N] 
+            cur_B = B[i]  # [way_num, C, N]
+            
+            M = cur_A.shape[0]
+            N = cur_B.shape[0]
 
-        B = F.adaptive_avg_pool2d(B, [1, 1])
-        B = B.repeat(1, 1, A.shape[2], A.shape[3])
+            cur_B = F.adaptive_avg_pool2d(cur_B, [1, 1])
+            cur_B = cur_B.repeat(1, 1, cur_A.shape[2], cur_A.shape[3])
 
-        A = A.unsqueeze(1)
-        B = B.unsqueeze(0)
+            cur_A = cur_A.unsqueeze(1)
+            cur_B = cur_B.unsqueeze(0)
 
-        A = A.repeat(1, N, 1, 1, 1)
-        B = B.repeat(M, 1, 1, 1, 1)
+            cur_A = cur_A.repeat(1, N, 1, 1, 1)
+            cur_B = cur_B.repeat(M, 1, 1, 1, 1)
 
-        combination = (A * B).sum(2)
-        combination = combination.view(M, N, -1)
-        combination = F.relu(combination) + 1e-3
+            cur_combination = (cur_A * cur_B).sum(2)
+            cur_combination = cur_combination.view(M, N, -1)
+            cur_combination = F.relu(cur_combination) + 1e-3
+            
+            combinations.append(cur_combination)
+            
+        combination = torch.stack(combinations)  # [episode_size, M, N, -1]
         return combination
 
 
@@ -384,44 +409,50 @@ class SFCLayer(nn.Module):
     def forward(self, support_feat):
         """SFC微调
         Args:
-            support_feat: [1, 5, 640, 1, 14]  # [episode_size, way_num, C, 1, N]
+            support_feat: [episode_size, way_num, C, 1, N]
         Returns:
-            proto: [1, way_num, C, 1, N]  # [1, 5, 640, 1, 14]
+            torch.Tensor: [episode_size, way_num, C, 1, N]
         """
-        # 1. 重塑support_feat维度以匹配源码
-        support_feat = support_feat.squeeze(0)  # [5, 640, 1, 14]
-        support_feat = support_feat.expand(self.shot_num, -1, -1, -1, -1)  # [shot_num, 5, 640, 1, 14]
-        support_feat = support_feat.transpose(0, 1)  # [5, shot_num, 640, 1, 14]
-        support_feat = support_feat.reshape(self.way_num * self.shot_num, -1, 1, 14)  # [5*shot_num, 640, 1, 14]
-        
-        # 2. 初始化原型
-        proto = support_feat.view(self.shot_num, self.way_num, self.hdim, 1, -1).mean(dim=0)  # [5, 640, 1, 14]
-        proto = proto.clone().detach()
-        proto = nn.Parameter(proto, requires_grad=True)  # 设置requires_grad=True
-        
-        # 3. 优化器设置
-        optimizer = torch.optim.SGD([proto], lr=self.lr, momentum=0.9, dampening=0.9, weight_decay=self.weight_decay)
-        
-        # 4. 训练标签
-        label_shot = torch.arange(self.way_num).repeat(self.shot_num).cuda()  # [5*shot_num]
-        
-        # 5. 微调过程 - 移除proto.train()
-        with torch.enable_grad():  # 确保梯度计算
-            for _ in range(self.update_step):
-                rand_id = torch.randperm(self.way_num * self.shot_num).cuda()
-                for j in range(0, self.way_num * self.shot_num, self.batch_size):
-                    selected_id = rand_id[j: min(j + self.batch_size, self.way_num * self.shot_num)]
-                    batch_shot = support_feat[selected_id]  # [bs, 640, 1, 14]
-                    batch_label = label_shot[selected_id]  # [bs]
-                    
-                    optimizer.zero_grad()
-                    logits = self.get_logits(proto, batch_shot)
-                    loss = F.cross_entropy(logits, batch_label)
-                    loss.backward()
-                    optimizer.step()
+        episode_size = support_feat.shape[0]
+        protos = []
+        for i in range(episode_size):
+            # 1. 重塑support_feat维度以匹配源码
+            cur_support = support_feat[i]  # [5, 640, 1, 14]
+            cur_support = cur_support.expand(self.shot_num, -1, -1, -1, -1)  # [shot_num, 5, 640, 1, 14]
+            cur_support = cur_support.transpose(0, 1)  # [5, shot_num, 640, 1, 14]
+            C = cur_support.shape[2]  # 获取通道数
+            N = cur_support.shape[-1]  # 获取最后一个维度
+            cur_support = cur_support.reshape(self.way_num * self.shot_num, C, 1, N)  # [5*shot_num, 640, 1, 14]
+            
+            # 2. 初始化原型
+            proto = cur_support.view(self.shot_num, self.way_num, self.hdim, 1, -1).mean(dim=0)  # [5, 640, 1, 14]
+            proto = proto.clone().detach()
+            proto = nn.Parameter(proto, requires_grad=True)  # 设置requires_grad=True
+            
+            # 3. 优化器设置
+            optimizer = torch.optim.SGD([proto], lr=self.lr, momentum=0.9, dampening=0.9, weight_decay=self.weight_decay)
+            
+            # 4. 训练标签
+            label_shot = torch.arange(self.way_num).repeat(self.shot_num).cuda()  # [5*shot_num]
+            
+            # 5. 微调过程 - 移除proto.train()
+            with torch.enable_grad():  # 确保梯度计算
+                for _ in range(self.update_step):
+                    rand_id = torch.randperm(self.way_num * self.shot_num).cuda()
+                    for j in range(0, self.way_num * self.shot_num, self.batch_size):
+                        selected_id = rand_id[j: min(j + self.batch_size, self.way_num * self.shot_num)]
+                        batch_shot = support_feat[selected_id]  # [bs, 640, 1, 14]
+                        batch_label = label_shot[selected_id]  # [bs]
+                        
+                        optimizer.zero_grad()
+                        logits = self.get_logits(proto, batch_shot)
+                        loss = F.cross_entropy(logits, batch_label)
+                        loss.backward()
+                        optimizer.step()
+            protos.append(proto.detach())
         
         # 6. 恢复维度
-        return proto.detach().unsqueeze(0)  # [1, 5, 640, 1, 14]
+        return torch.stack(protos)  # [episode_size, way_num, C, 1, N]
 
     def get_logits(self, proto, query):
         """计算分类得分
@@ -493,7 +524,7 @@ class DeepEMD(MetricModel):
 
     
     def set_forward(self, batch):
-        image, _ = batch
+        image = batch[0]
         image = image.to(self.device)
         episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
         
@@ -524,12 +555,13 @@ class DeepEMD(MetricModel):
         logits = self.emd_layer(similarity_map, weight_1, weight_2)
         
         # 4. 重塑输出
-        logits = logits.reshape(episode_size * self.way_num * self.query_num, self.way_num)
+        logits = logits.reshape(episode_size, self.way_num * self.query_num, self.way_num)
+        logits = logits.reshape(-1, self.way_num)  # 展平所有episode的结果
         acc = accuracy(logits, query_target.reshape(-1))
         return logits, acc
 
     def set_forward_loss(self, batch):
-        image, _ = batch
+        image = batch[0]
         image = image.to(self.device)
         episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
         
@@ -554,7 +586,8 @@ class DeepEMD(MetricModel):
         weight_2 = self.similarity_layer.get_weight_vector(support_feat, query_feat)
         logits = self.emd_layer(similarity_map, weight_1, weight_2)
         
-        logits = logits.reshape(episode_size * self.way_num * self.query_num, self.way_num)
+        logits = logits.reshape(episode_size, self.way_num * self.query_num, self.way_num)
+        logits = logits.reshape(-1, self.way_num)  # 展平所有episode的结果  
         loss = self.loss_func(logits, query_target.reshape(-1))
         acc = accuracy(logits, query_target.reshape(-1))
         
