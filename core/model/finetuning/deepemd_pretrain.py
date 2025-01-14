@@ -104,6 +104,7 @@ class DeepEMDPretrain(FinetuningModel):
         super().__init__(**kwargs)
         self.hdim = hdim
         self.temperature = temperature
+
         self.deep_emd = DeepEMD(hdim=self.hdim, temperature=self.temperature, **kwargs)
         self.classifier = nn.Linear(self.hdim, self.num_class)
         self.loss_func = nn.CrossEntropyLoss()
@@ -134,23 +135,34 @@ class DeepEMDPretrain(FinetuningModel):
         image, target = batch
         image = image.to(self.device)
         target = target.to(self.device)
-
         # print("batch", batch[0].shape, batch[1].shape)
 
         # 标准分类训练
         feat = self.emb_func(image)
         # print("feat", feat.shape)
-        if self.feature_mode == 'fcn':  # 最正常的训练就行，不要金字塔
+        if self.feature_mode == 'fcn':  # 最正常的训练就行
             out = self.classifier(feat)
             loss = self.loss_func(out, target)
             acc = accuracy(out, target)
             return out, acc, loss
         else:
-            raise NotImplementedError("Not implemented yet")
+            # 特征提取器提取特征
+            if len(feat.shape) == 2:
+                B, C = feat.shape
+                feat = feat.reshape(B, C, 1, 1)
+            elif len(feat.shape) == 3:
+                B, C, N = feat.shape
+                feat = feat.reshape(B, C, int(N ** 0.5), int(N ** 0.5))
+            feat = self.feature_extractor.forward(feat)  # 特征提取器提取特征 feat: [batch_size, num_patch, hdim]
+            num_patch = feat.shape[1]
+            feat = feat.reshape(-1, feat.shape[-1])  # feat: [batch_size*num_patch, hdim]
+            target = target.repeat(num_patch)
+            out = self.classifier(feat)
+            loss = self.loss_func(out, target)
+            acc = accuracy(out, target)
+            return out, acc, loss
 
-
-
-    # output = self.classifier(feat)
-    # loss = self.loss_func(output, target)
-    # acc = accuracy(output, target)
-    # return output, acc, loss
+        # output = self.classifier(feat)
+        # loss = self.loss_func(output, target)
+        # acc = accuracy(output, target)
+        # return output, acc, loss
