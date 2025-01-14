@@ -1,14 +1,39 @@
-# version1
+## version1
+#classifier:
+#  name: DeepEMDPretrain
+#  kwargs:
+#    feat_dim: 640
+#    num_class: 64 # 预训练类别数
+#    # SFC参数
+#    sfc_lr: 0.1
+#    sfc_update_step: 100
+#    sfc_bs: 4
+#    # Solver参数
+#    form: QP
+#    l2_strength: 0.0001
+#    solver: opencv # ?
+
 classifier:
   name: DeepEMDPretrain
   kwargs:
-    feat_dim: 640  
-    num_class: 64 # 预训练类别数
-    # SFC参数
-    sfc_lr: 0.1
-    sfc_update_step: 100
-    sfc_bs: 4
+    hdim: 640
+    num_class: 64
+    temperature: 12.5
+    solver: opencv
+    feature_mode: fcn
     # Solver参数
     form: QP
     l2_strength: 0.0001
-    solver: opencv # ?
+    # 特征提取参数
+    feature_pyramid: "2,3"
+    patch_list: "2,3"
+    patch_ratio: 1.0
+    num_patch: 9
+    # SFC参数
+    sfc_lr: 0.1
+    sfc_wd: 0
+    sfc_update_step: 100
+    sfc_bs: 4
+    # 其他参数
+    metric: cosine
+    norm: center

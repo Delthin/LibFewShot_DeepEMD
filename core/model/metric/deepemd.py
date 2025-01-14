@@ -597,7 +597,7 @@ class DeepEMD(MetricModel):
         return data[reordered_idx]
 
     def _split_by_episode(self, features, mode):
-        episode_size = features.size(0) // (self.way_num * (self.shot_num + self.query_num))
+        episode_size = features.size(0) // (self.way_num * (self.shot_num + self.query_num)) # episode的数量，而非episode的大小
         
         # 生成正确顺序的标签
         labels_per_episode = []
