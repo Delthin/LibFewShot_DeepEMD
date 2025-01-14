@@ -543,7 +543,6 @@ class DeepEMD(MetricModel):
         super().__init__(**kwargs)
         self.hdim = hdim
         self.temperature = temperature
-        self.n_gpu = kwargs.get('n_gpu', 1)
 
         # 1. FeatureExtractor参数
         feature_kwargs = {
@@ -587,28 +586,70 @@ class DeepEMD(MetricModel):
 
         self.loss_func = nn.CrossEntropyLoss()
 
+    def _reorder_samples(self, data):
+        """公共的重排函数"""
+        reordered_idx = []
+        samples_per_class = self.shot_num + self.query_num
+        for i in range(samples_per_class):
+            for j in range(self.way_num):
+                idx = j * samples_per_class + i
+                reordered_idx.append(idx)
+        return data[reordered_idx]
+
+    def _split_by_episode(self, features, mode):
+        episode_size = features.size(0) // (self.way_num * (self.shot_num + self.query_num))
+        
+        # 生成正确顺序的标签
+        labels_per_episode = []
+        for i in range(self.shot_num + self.query_num):
+            for j in range(self.way_num):
+                labels_per_episode.append(j)
+        
+        local_labels = torch.tensor(labels_per_episode, device=self.device)
+        local_labels = local_labels.repeat(episode_size)
+        
+        if mode == 2:
+            b, c, h, w = features.shape
+            
+            # 关键修改：正确重组特征
+            features = features.view(episode_size, -1, c, h, w)  # [episode_size, way*(shot+query), c, h, w]
+            
+            # 分离support和query特征
+            support_features = features[:, :self.way_num*self.shot_num]
+            query_features = features[:, self.way_num*self.shot_num:]
+            
+            # Reshape support特征为[episode_size, way_num * shot_num, c, h, w]
+            support_features = support_features.contiguous()
+            
+            # Reshape query特征为[episode_size, way_num * query_num, c, h, w]
+            query_features = query_features.contiguous()
+            
+            # 分离标签
+            local_labels = local_labels.view(episode_size, -1)
+            support_target = local_labels[:, :self.way_num*self.shot_num]
+            query_target = local_labels[:, self.way_num*self.shot_num:]
+            
+        return support_features, query_features, support_target, query_target
+
     def set_forward(self, batch):
         image = batch[0]
         image = image.to(self.device)
         episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
-
-        # 1. 特征提取
-        feat = self.emb_func(image)  # [80, 640]
-        # 修正维度
+        
+        # 重排数据
+        image = self._reorder_samples(image)
+        
+        feat = self.emb_func(image)
         if len(feat.shape) == 2:
             B, C = feat.shape
-            feat = feat.view(B, C, 1, 1)  # [80, 640, 1, 1]
+            feat = feat.view(B, C, 1, 1)
         elif len(feat.shape) == 3:
             B, C, N = feat.shape
             feat = feat.view(B, C, int(N ** 0.5), int(N ** 0.5))
 
-        feat = self.feature_extractor(feat)  # [80, 640, 1, 14] (fcn mode)
-
-        if self.feature_mode == 'fcn':
-            mode = 2  # 4D
-        else:
-            mode = 1  # 3D
-        support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=mode)
+        feat = self.feature_extractor(feat)
+        support_feat, query_feat, support_target, query_target = self._split_by_episode(feat, mode=2)
+        
         # 2. SFC微调(仅在测试时使用)
         if not self.training and self.shot_num > 1:
             support_feat = self.sfc_layer(support_feat)
@@ -626,35 +667,33 @@ class DeepEMD(MetricModel):
         return logits, acc
 
     def set_forward_loss(self, batch):
-        start = time.perf_counter()
         image = batch[0]
         image = image.to(self.device)
         episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
 
+        image = self._reorder_samples(image)
+        
         feat = self.emb_func(image)
-
         if len(feat.shape) == 2:
             B, C = feat.shape
             feat = feat.view(B, C, 1, 1)
         elif len(feat.shape) == 3:
             B, C, N = feat.shape
             feat = feat.view(B, C, int(N ** 0.5), int(N ** 0.5))
+
         feat = self.feature_extractor(feat)
+        support_feat, query_feat, support_target, query_target = self._split_by_episode(feat, mode=2)
 
-        if self.feature_mode == 'fcn':
-            mode = 2
-        else:
-            mode = 1
-        support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=mode)
-        # while training, we don't use the SFC layer
+        # EMD计算
         similarity_map = self.similarity_layer(support_feat, query_feat)
-
+        
         weight_1 = self.similarity_layer.get_weight_vector(query_feat, support_feat)
         weight_2 = self.similarity_layer.get_weight_vector(support_feat, query_feat)
+        
         logits = self.emd_layer(similarity_map, weight_1, weight_2)
-
+        
         logits = logits.reshape(episode_size, self.way_num * self.query_num, self.way_num)
-        logits = logits.reshape(-1, self.way_num)  # 展平所有episode的结果
+        logits = logits.reshape(-1, self.way_num)
         loss = self.loss_func(logits, query_target.reshape(-1))
         acc = accuracy(logits, query_target.reshape(-1))
 
