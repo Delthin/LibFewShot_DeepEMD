@@ -25,46 +25,37 @@ class EMDSolver(nn.Module):
 class OpenCVSolver(EMDSolver):
     """OpenCV EMD solver实现"""
     def forward(self, distance_matrix, weight1, weight2):
-        """
+        """批量处理EMD
         Args:
-            distance_matrix: [1, N, N]  # [1, 14, 14]
-            weight1: [1, N]  # [1, 14]
-            weight2: [1, N]  # [1, 14]
+            distance_matrix: [batch_size, N, N]  # [750, 14, 14]
+            weight1: [batch_size, N]  # [750, 14]
+            weight2: [batch_size, N]  # [750, 14]
         Returns:
-            torch.Tensor: [1, N, N] flow矩阵
+            torch.Tensor: [batch_size, N, N] flow矩阵
         """
-        # 去除batch维度
-        distance_matrix = distance_matrix.squeeze(0)  # [N, N]
-        weight1 = weight1.squeeze(0)  # [N]
-        weight2 = weight2.squeeze(0)  # [N]
+        # 并行处理所有batch
+        batch_size = distance_matrix.shape[0]
+        flows = []
         
-        # 计算单个EMD
-        _, flow = self._solve_single(
-            distance_matrix,
-            weight1,
-            weight2
-        )
-        # 添加batch维度返回
-        return torch.from_numpy(flow).cuda().unsqueeze(0)  # [1, N, N]
+        # 使用torch.parallel.parallel_apply并行处理
+        def process_single(idx):
+            cost_matrix = distance_matrix[idx].detach().cpu().numpy()
+            w1 = F.relu(weight1[idx]) + 1e-5
+            w2 = F.relu(weight2[idx]) + 1e-5
+            
+            w1 = (w1 * (w1.shape[0] / w1.sum().item())).view(-1, 1).detach().cpu().numpy()
+            w2 = (w2 * (w2.shape[0] / w2.sum().item())).view(-1, 1).detach().cpu().numpy()
+            
+            _, _, flow = cv2.EMD(w1, w2, cv2.DIST_USER, cost_matrix)
+            return torch.from_numpy(flow).cuda()
 
-    def _solve_single(self, cost_matrix, weight1, weight2):
-        """解决单个EMD问题
-        Args:
-            cost_matrix: [N, N]  # [14, 14]
-            weight1: [N]  # [14]
-            weight2: [N]  # [14]
-        """
-        # 转换为float32类型
-        cost_matrix = cost_matrix.detach().cpu().numpy()
+        # 使用多线程并行处理
+        from torch.nn.parallel import parallel_apply
+        flows = parallel_apply([lambda x: process_single(x) for x in range(batch_size)], 
+                             tuple(range(batch_size)))
+        flows = torch.stack(flows)
         
-        weight1 = F.relu(weight1) + 1e-5
-        weight2 = F.relu(weight2) + 1e-5
-        
-        weight1 = (weight1 * (weight1.shape[0] / weight1.sum().item())).view(-1, 1).detach().cpu().numpy()
-        weight2 = (weight2 * (weight2.shape[0] / weight2.sum().item())).view(-1, 1).detach().cpu().numpy()
-        
-        cost, _, flow = cv2.EMD(weight1, weight2, cv2.DIST_USER, cost_matrix)
-        return cost, flow
+        return flows  # [batch_size, N, N]
 
 class QPTHSolver(EMDSolver):
     """QPTH EMD solver实现"""
@@ -74,14 +65,13 @@ class QPTHSolver(EMDSolver):
         self.l2_strength = l2_strength
         
     def forward(self, distance_matrix, weight1, weight2):
-        """使用QPTH计算EMD距离
+        """批量求解QP
         Args:
-            distance_matrix (torch.Tensor): [batch_size, num_node, num_node]
-            weight1 (torch.Tensor): [batch_size, num_node] 
-            weight2 (torch.Tensor): [batch_size, num_node]
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: (emd_score, flow)
+            distance_matrix: [batch_size, N, N]  # [750, 14, 14]
+            weight1: [batch_size, N]  # [750, 14]
+            weight2: [batch_size, N]  # [750, 14]
         """
+        # 直接处理整个batch
         weight1 = (weight1 * weight1.shape[-1]) / weight1.sum(1).unsqueeze(1)
         weight2 = (weight2 * weight2.shape[-1]) / weight2.sum(1).unsqueeze(1)
         
@@ -89,17 +79,11 @@ class QPTHSolver(EMDSolver):
         nelement_distmatrix = distance_matrix.shape[1] * distance_matrix.shape[2]
         
         Q_1 = distance_matrix.view(-1, 1, nelement_distmatrix).double()
+        Q = torch.bmm(Q_1.transpose(2, 1), Q_1).double().cuda()
         
-        if self.form == 'QP':
-            Q = torch.bmm(Q_1.transpose(2, 1), Q_1).double().cuda() + 1e-4 * torch.eye(
-                nelement_distmatrix).double().cuda().unsqueeze(0).repeat(nbatch, 1, 1)
-            p = torch.zeros(nbatch, nelement_distmatrix).double().cuda()
-        else:
-            Q = (self.l2_strength * torch.eye(nelement_distmatrix).double()).cuda().unsqueeze(0).repeat(nbatch, 1, 1)
-            p = distance_matrix.view(nbatch, nelement_distmatrix).double()
-            
+        # 直接使用QPFunction处理整个batch
         flow = self._qp_solve(Q, p, weight1, weight2)
-        return flow
+        return flow.view(nbatch, -1, -1)  # [batch_size, N, N]
         
     def _qp_solve(self, Q, p, weight1, weight2):
         """求解QP问题
@@ -159,43 +143,32 @@ class EMDLayer(nn.Module):
             self.solver = QPTHSolver(form, l2_strength)
             
     def forward(self, similarity_map, weight_1, weight_2):
-        """计算EMD距离
+        """计算EMD距离 - 并行版本
         Args:
-            similarity_map: [num_query, way_num, N, N]  # [75, 5, 14, 14]
+            similarity_map: [episode_size, num_query, way_num, N, N]
             weight_1: [episode_size, num_query, way_num, N]
             weight_2: [episode_size, way_num, num_query, N]
         Returns:
-            torch.Tensor: [episode_size, num_query, way_num] EMD距离
+            torch.Tensor: [episode_size, num_query, way_num]
         """
-        episode_size = similarity_map.shape[0]
-        num_query = similarity_map.shape[1]
-        num_proto = similarity_map.shape[2]
-        num_node = similarity_map.shape[-1]
+        # 1. 获取维度信息
+        episode_size, num_query, way_num, N, _ = similarity_map.shape
+        # 2. 重塑输入以进行并行计算
+        similarity_map = similarity_map.view(-1, N, N)  # [episode_size*num_query*way_num, N, N]
+        weight_1 = weight_1.view(-1, N)  # [episode_size*num_query*way_num, N]
+        weight_2 = weight_2.transpose(1,2).contiguous().view(-1, N)  # [episode_size*num_query*way_num, N]
         
-        all_logits = []
+        # 3. 并行计算EMD
+        cost_matrix = 1 - similarity_map
+        flow = self.solver(cost_matrix,
+                        weight_1,
+                        weight_2)  # [episode_size*num_query*way_num, N, N]
         
-        logits = torch.zeros(num_query, num_proto).to(similarity_map.device)
+        # 4. 计算得分并重塑
+        scores = (flow * similarity_map).sum((-1,-2))  # [episode_size*num_query*way_num]
+        scores = scores.view(episode_size, num_query, way_num)  # [episode_size, num_query, way_num]
         
-        for i in range(episode_size):
-            cur_logits = torch.zeros(num_query, num_proto).to(similarity_map.device)
-            
-            for j in range(num_query):
-                for k in range(num_proto):
-                    cost_matrix = 1 - similarity_map[i, j, k]  # [N, N]
-                    w1 = weight_1[i, j, k]                     # [N]
-                    w2 = weight_2[i, k, j]                     # [N]
-                    
-                    flow = self.solver(cost_matrix.unsqueeze(0),
-                                    w1.unsqueeze(0),
-                                    w2.unsqueeze(0))          # [1, N, N]
-                    
-                    score = (flow.squeeze(0) * similarity_map[i, j, k]).sum()
-                    cur_logits[j, k] = score
-                    
-            all_logits.append(cur_logits)
-            
-        logits = torch.stack(all_logits)  # [episode_size, num_query, way_num]
-        return logits * (self.temperature / num_node)
+        return scores * (self.temperature / N)
 
 class SimilarityLayer(nn.Module):
     def __init__(self, metric='cosine', norm='center'):
@@ -204,50 +177,42 @@ class SimilarityLayer(nn.Module):
         self.norm = norm
     
     def forward(self, proto, query):
-        """计算特征相似度
+        """计算特征相似度 - 并行版本
         Args:
-            proto: [episode_size, way_num, C, 1, N] -> [way_num, C, N]
-            query: [episode_size, query_num*way_num, C, 1, N] -> [query_num*way_num, C, N]
+            proto: [episode_size, way_num, C, 1, N]
+            query: [episode_size, query_num*way_num, C, 1, N]
         Returns:
-            torch.Tensor: [episode_size, num_query, way_num, N, N] 相似度矩阵
+            torch.Tensor: [episode_size, num_query, way_num, N, N]
         """
-        episode_size = proto.shape[0]
-        similarity_maps = []
-        # 1. 去除多余维度
-        for i in range(episode_size):
-            cur_proto = proto[i].squeeze(2)  # [way_num, C, N]
-            cur_query = query[i].squeeze(2)  # [query_num*way_num, C, N]
-            
-            way_num = cur_proto.shape[0]
-            num_query = cur_query.shape[0]
-
-            # 2. 重复扩展
-            cur_proto = cur_proto.unsqueeze(0).repeat(num_query, 1, 1, 1)  # [num_query, way_num, C, N]
-            cur_query = cur_query.unsqueeze(1).repeat(1, way_num, 1, 1)    # [num_query, way_num, C, N]
-            
-            # 3. 计算相似度
-            if self.metric == 'cosine':
-                cur_proto = cur_proto.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
-                cur_query = cur_query.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
-                
-                cur_proto = cur_proto.unsqueeze(3)  # [num_query, way_num, N, 1, C]
-                cur_query = cur_query.unsqueeze(2)  # [num_query, way_num, 1, N, C]
-                
-                similarity_map = F.cosine_similarity(cur_proto, cur_query, dim=-1)  # [num_query, way_num, N, N]
-                
-            elif self.metric == 'l2':
-                cur_proto = cur_proto.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
-                cur_query = cur_query.permute(0, 1, 3, 2)  # [num_query, way_num, N, C]
-                
-                cur_proto = cur_proto.unsqueeze(3)  # [num_query, way_num, N, 1, C]
-                cur_query = cur_query.unsqueeze(2)  # [num_query, way_num, 1, N, C]
-                
-                l2_distance = (cur_proto - cur_query).pow(2).sum(-1)  # [num_query, way_num, N, N]
-                similarity_map = 1 - l2_distance  # 转换为相似度
-            similarity_maps.append(similarity_map)
-            
-        return torch.stack(similarity_maps) # [episode_size, num_query, way_num, N, N]
+        # 1. 获取维度信息
+        episode_size, way_num, C, _, N = proto.shape
+        num_query = query.shape[1]
         
+        # 2. 去除多余维度并重塑
+        proto = proto.squeeze(3)  # [episode_size, way_num, C, N]
+        query = query.squeeze(3)  # [episode_size, query_num*way_num, C, N]
+        
+        # 3. 重塑维度用于并行计算
+        proto = proto.unsqueeze(2).expand(-1, -1, num_query, -1, -1)  # [episode_size, way_num, num_query, C, N]
+        query = query.view(episode_size, num_query, 1, C, N).expand(-1, -1, way_num, -1, -1)  # [episode_size, num_query, way_num, C, N]
+        
+        # 4. 计算相似度
+        if self.metric == 'cosine':
+            proto = proto.permute(0, 2, 1, 4, 3)  # [episode_size, num_query, way_num, N, C]
+            query = query.permute(0, 1, 2, 4, 3)  # [episode_size, num_query, way_num, N, C]
+            similarity_map = torch.matmul(proto, query.transpose(-1, -2))  # [episode_size, num_query, way_num, N, N]
+            norm_proto = torch.norm(proto, p=2, dim=-1, keepdim=True)
+            norm_query = torch.norm(query, p=2, dim=-1, keepdim=True)
+            similarity_map = similarity_map / (norm_proto * norm_query.transpose(-1, -2) + 1e-8)
+            
+        elif self.metric == 'l2':
+            proto = proto.unsqueeze(4)  # [episode_size, num_query, way_num, N, 1, C]
+            query = query.unsqueeze(3)  # [episode_size, num_query, way_num, 1, N, C]
+            
+            similarity_map = 1 - (proto - query).pow(2).sum(-1)  # [episode_size, num_query, way_num, N, N]
+        
+        return similarity_map   
+    
     def normalize_feature(self, x):
         """特征归一化"""
         if self.norm == 'center':
@@ -544,7 +509,7 @@ class DeepEMD(MetricModel):
             mode = 1  # 3D
         support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=mode)
         # 2. SFC微调(仅在测试时使用)
-        if not self.training and self.shot_num >= 1:
+        if not self.training and self.shot_num > 1:
             support_feat = self.sfc_layer(support_feat)
 
         # 3. EMD计算
