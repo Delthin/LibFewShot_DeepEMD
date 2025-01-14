@@ -165,7 +165,7 @@ class EMDLayer(nn.Module):
             weight_1: [episode_size, num_query, way_num, N]
             weight_2: [episode_size, way_num, num_query, N]
         Returns:
-            torch.Tensor: [num_query, way_num] EMD距离
+            torch.Tensor: [episode_size, num_query, way_num] EMD距离
         """
         episode_size = similarity_map.shape[0]
         num_query = similarity_map.shape[1]
@@ -220,7 +220,7 @@ class SimilarityLayer(nn.Module):
             
             way_num = cur_proto.shape[0]
             num_query = cur_query.shape[0]
-            
+
             # 2. 重复扩展
             cur_proto = cur_proto.unsqueeze(0).repeat(num_query, 1, 1, 1)  # [num_query, way_num, C, N]
             cur_query = cur_query.unsqueeze(1).repeat(1, way_num, 1, 1)    # [num_query, way_num, C, N]
@@ -441,11 +441,11 @@ class SFCLayer(nn.Module):
                     rand_id = torch.randperm(self.way_num * self.shot_num).cuda()
                     for j in range(0, self.way_num * self.shot_num, self.batch_size):
                         selected_id = rand_id[j: min(j + self.batch_size, self.way_num * self.shot_num)]
-                        batch_shot = support_feat[selected_id]  # [bs, 640, 1, 14]
+                        batch_shot = cur_support.reshape(self.way_num * self.shot_num, -1, 1, N)[selected_id]
                         batch_label = label_shot[selected_id]  # [bs]
                         
                         optimizer.zero_grad()
-                        logits = self.get_logits(proto, batch_shot)
+                        logits = self.get_logits(proto, batch_shot)# proto: [way_num, C, 1, N], batch_shot: [bs, C, 1, N]
                         loss = F.cross_entropy(logits, batch_label)
                         loss.backward()
                         optimizer.step()
@@ -469,8 +469,7 @@ class SFCLayer(nn.Module):
         
         # 使用已经定义好的emd_layer
         logits = self.emd_layer(similarity_map, weight_1, weight_2)
-        
-        return logits
+        return logits.squeeze(0)  # [bs, way_num]
 
 
 class DeepEMD(MetricModel):
