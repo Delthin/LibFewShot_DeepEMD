@@ -9,6 +9,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 
+
 class EMDSolver(nn.Module):
     """EMD solver基类"""
 
@@ -421,7 +422,7 @@ class FeatureExtractor(nn.Module):
             # 提取每个位置的特征
             patch = x[i, :, pos_h[i], pos_w[i]]  # [channel, num_patch]
             patches.append(patch.t())  # [num_patch, channel]
-            
+
         patches = torch.stack(patches)
         return patches
 
