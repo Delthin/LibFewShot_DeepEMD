@@ -7,9 +7,15 @@ includes:
   - classifiers/DeepEMD.yaml
   - backbones/resnet12.yaml
 
-seed: 1 # maybe in reproduce?
-pretrain_path: null
-test_episode: 600 # 源代码是5000，val是1000
+pretrain_path: ./results/DeepEMDPretrain-miniImageNet--ravi-resnet12-5-1-Jan-15-2025-04-43-19/checkpoints/emb_func_best.pth
+train_episode: 300
+test_episode: 400 # 源代码是5000，val是1000
+workers: 8 # number of workers for dataloader in all threads
+dataloader_num: 2
+persistent_workers: True  # 保持worker进程
+deterministic: False
+episode_size: 1
+epoch: 50
 
 optimizer:
   name: SGD
