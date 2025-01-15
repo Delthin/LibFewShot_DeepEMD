@@ -510,10 +510,11 @@ class SFCLayer(nn.Module):
 
 
 class DeepEMD(MetricModel):
-    def __init__(self, hdim, temperature=12.5, **kwargs):
+    def __init__(self, hdim, temperature=12.5, pretrain=False, **kwargs):
         super().__init__(**kwargs)
         self.hdim = hdim
         self.temperature = temperature
+        self.pretrain = pretrain
 
         # 1. FeatureExtractor参数
         feature_kwargs = {
@@ -568,6 +569,7 @@ class DeepEMD(MetricModel):
         return data[reordered_idx]
 
     def _split_by_episode(self, features, mode):
+        """用于重排的框架重载实现，按episode划分特征"""
         episode_size = features.size(0) // (self.way_num * (self.shot_num + self.query_num))
         
         # 生成正确顺序的标签
@@ -602,14 +604,24 @@ class DeepEMD(MetricModel):
             
         return support_features, query_features, support_target, query_target
 
-    def set_forward(self, batch):
-        image = batch[0]
-        image = image.to(self.device)
+    def _extract_and_compute_emd(self, batch, require_loss=False):
+        """特征提取和EMD计算的统一接口
+        
+        Args:
+            batch: 输入数据
+            require_loss: 是否需要计算损失
+        
+        Returns:
+            require_loss=False: (logits, acc)
+            require_loss=True: (logits, acc, loss)
+        """
+        # 1. 基础特征提取
+        image = batch[0].to(self.device)
         episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
+        if not self.pretrain:
+            image = self._reorder_samples(image)
         
-        # 重排数据
-        image = self._reorder_samples(image)
-        
+        # 2. 特征编码
         feat = self.emb_func(image)
         if len(feat.shape) == 2:
             B, C = feat.shape
@@ -618,53 +630,37 @@ class DeepEMD(MetricModel):
             B, C, N = feat.shape
             feat = feat.view(B, C, int(N ** 0.5), int(N ** 0.5))
 
+        # 3. 特征变换
         feat = self.feature_extractor(feat)
-        support_feat, query_feat, support_target, query_target = self._split_by_episode(feat, mode=2)
+        mode = 1 if self.feature_extractor.feature_mode in ['grid', 'sampling'] else 2
+        if self.pretrain:
+            support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=mode)
+        else: 
+            support_feat, query_feat, support_target, query_target = self._split_by_episode(feat, mode=mode)
         
-        # 2. SFC微调(仅在测试时使用)
+        # 4. SFC微调
         if not self.training and self.shot_num > 1:
             support_feat = self.sfc_layer(support_feat)
 
-        # 3. EMD计算
+        # 5. EMD计算
         similarity_map = self.similarity_layer(support_feat, query_feat)
         weight_1 = self.similarity_layer.get_weight_vector(query_feat, support_feat)
         weight_2 = self.similarity_layer.get_weight_vector(support_feat, query_feat)
         logits = self.emd_layer(similarity_map, weight_1, weight_2)
-
-        # 4. 重塑输出
-        logits = logits.reshape(episode_size, self.way_num * self.query_num, self.way_num)
-        logits = logits.reshape(-1, self.way_num)  # 展平所有episode的结果
-        acc = accuracy(logits, query_target.reshape(-1))
-        return logits, acc
-
-    def set_forward_loss(self, batch):
-        image = batch[0]
-        image = image.to(self.device)
-        episode_size = image.size(0) // (self.way_num * (self.shot_num + self.query_num))
-
-        image = self._reorder_samples(image)
         
-        feat = self.emb_func(image)
-        if len(feat.shape) == 2:
-            B, C = feat.shape
-            feat = feat.view(B, C, 1, 1)
-        elif len(feat.shape) == 3:
-            B, C, N = feat.shape
-            feat = feat.view(B, C, int(N ** 0.5), int(N ** 0.5))
-
-        feat = self.feature_extractor(feat)
-        support_feat, query_feat, support_target, query_target = self._split_by_episode(feat, mode=2)
-
-        # EMD计算
-        similarity_map = self.similarity_layer(support_feat, query_feat)
-        
-        weight_1 = self.similarity_layer.get_weight_vector(query_feat, support_feat)
-        weight_2 = self.similarity_layer.get_weight_vector(support_feat, query_feat)
-        
-        logits = self.emd_layer(similarity_map, weight_1, weight_2)
+        # 6. 根据需求返回不同结果
         logits = logits.reshape(episode_size, self.way_num * self.query_num, self.way_num)
         logits = logits.reshape(-1, self.way_num)
-        loss = self.loss_func(logits, query_target.reshape(-1))
+        
         acc = accuracy(logits, query_target.reshape(-1))
+        if not require_loss:
+            return logits, acc
+        else:
+            loss = self.loss_func(logits, query_target.reshape(-1))
+            return logits, acc, loss
 
-        return logits, acc, loss
+    def set_forward(self, batch):
+        return self._extract_and_compute_emd(batch, require_loss=False)
+
+    def set_forward_loss(self, batch):
+        return self._extract_and_compute_emd(batch, require_loss=True)

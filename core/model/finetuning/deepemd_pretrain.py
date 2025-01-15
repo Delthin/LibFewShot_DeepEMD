@@ -11,7 +11,7 @@ class DeepEMDPretrain(FinetuningModel):
         self.hdim = hdim
         self.temperature = temperature
         
-        self.deep_emd = DeepEMD(hdim=self.hdim, temperature=self.temperature, **kwargs)
+        self.deep_emd = DeepEMD(hdim=self.hdim, temperature=self.temperature,pretrain=True, **kwargs)
         self.classifier = nn.Linear(self.hdim, self.num_class)
         self.loss_func = nn.CrossEntropyLoss()
 
